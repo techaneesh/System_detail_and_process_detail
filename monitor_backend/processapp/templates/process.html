@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Process Monitor</title>
+  <style>
+    body { font-family: Arial; margin: 0; background: #f8f9fa; }
+    header { background: #734F96; color:white; padding: 1rem; text-align: center; font-size: 1.5rem; }
+    .host-tabs, .sub-tabs { display: flex; background: #e9ecef; padding: 0.5rem; }
+    .host-tabs div, .sub-tabs div {
+      margin-right: 1rem;
+      padding: 0.5rem 1rem;
+      background: #dee2e6;
+      cursor: pointer;
+      border-radius: 5px;
+    }
+    .host-tabs .active, .sub-tabs .active { background: #734F96; color: white; }
+    #content { padding: 1rem; }
+    ul { list-style: none; padding-left: 20px; }
+    li { padding: 5px; margin: 4px 0; background: white; border: 1px solid #ccc; border-radius: 4px; }
+    .expand { cursor: pointer; font-weight: bold; margin-right: 6px; color: #734F96; }
+    .hidden { display: none; }
+    .label { font-weight: bold; }
+  </style>
+</head>
+<body>
+
+<header>System Details and Process Monitor</header>
+
+<div class="host-tabs" id="hostTabs"></div>
+<div class="sub-tabs">
+  <div id="tabSystem" onclick="switchTab('system')" class="active">System Details</div>
+  <div id="tabProcesses" onclick="switchTab('processes')">Process List</div>
+</div>
+
+<div id="content"></div>
+
+<script>
+let selectedHost = '';
+let selectedTab = 'system';
+let data = [];
+
+function switchTab(tab) {
+  selectedTab = tab;
+  document.getElementById("tabSystem").classList.remove("active");
+  document.getElementById("tabProcesses").classList.remove("active");
+  document.getElementById("tab" + tab.charAt(0).toUpperCase() + tab.slice(1)).classList.add("active");
+  render();
+}
+
+function selectHost(host) {
+  selectedHost = host;
+  document.querySelectorAll(".host-tabs div").forEach(el => el.classList.remove("active"));
+  document.getElementById("host-" + host).classList.add("active");
+  render();
+}
+
+async function fetchData() {
+  const response = await fetch("http://127.0.0.1:8000/api/data/");
+  data = await response.json();
+
+  const hosts = [...new Set(data.map(d => d.hostname))];
+  const tabHtml = hosts.map(host =>
+    `<div id="host-${host}" onclick="selectHost('${host}')" class="${host === selectedHost ? 'active' : ''}">${host}</div>`
+  ).join('');
+  document.getElementById("hostTabs").innerHTML = tabHtml;
+  if (!selectedHost && hosts.length) selectedHost = hosts[0];
+  render();
+}
+
+
+function render() {
+  const container = document.getElementById("content");
+  const hostData = data.filter(d => d.hostname === selectedHost);
+
+  if (selectedTab === 'system') {
+    const info = hostData[0];
+    if (!info) return container.innerHTML = "<p>No system info available.</p>";
+    const ramPercent = info.ram_total ? ((info.ram_used / info.ram_total) * 100) : 0;
+    container.innerHTML = `
+      <p><span class="label">Hostname:</span> ${info.hostname}</p>
+      <p><span class="label">OS:</span> ${info.os}</p>
+      <p><span class="label">CPU:</span> ${info.cpu}</p>
+      <p><span class="label">CPU Threads:</span> ${info.cpu_threads || 'N/A'}</p>
+      <p><span class="label">CPU Cores:</span> ${info.cpu_cores || 'N/A'}</p>
+      <p><span class="label">RAM Total:</span> ${(info.ram_total / 1024).toFixed(2)} GB</p>
+      <p><span class="label">RAM Available:</span> ${(info.ram_available / 1024).toFixed(2)} GB</p>
+      <p><span class="label">RAM Used:</span> ${(info.ram_used / 1024).toFixed(2)} GB</p>
+      <div style="margin:10px 0;">
+        <span class="label">RAM Usage:</span>
+        <div style="background:#eee;width:200px;display:inline-block;vertical-align:middle;">
+          <div style="background:#28a745;width:${ramPercent}%;height:16px;"></div>
+        </div> ${ramPercent.toFixed(1)}%
+      </div>
+      <p><span class="label">RAM Free:</span> ${(info.ram_free / 1024).toFixed(2)} GB</p>
+      <p><span class="label">Storage:</span> ${info.storage_total.toFixed(1)/1000} GB</p>
+      <p><span class="label">PID Count:</span> ${hostData.length}</p>
+      <p><span class="label">Processes:</span> ${hostData.length}</p>
+
+    `;
+  } else {
+    if (!hostData.length) {
+      container.innerHTML = "<p>No process data available.</p>";
+    } else {
+      const processes = hostData.filter(
+        p => typeof p.pid === "number" && p.process_name
+      ).map(p => ({
+        pid: p.pid,
+        ppid: p.ppid,
+        name: p.process_name,
+        cpu_percent: p.cpu_usage,
+        memory_mb: (p.memory_usage * (p.ram_total || 1) / 100) || 0 // fallback if ram_total missing
+      }));
+
+      function buildProcessTree(processes) {
+        const pidMap = {};
+        processes.forEach(proc => { pidMap[proc.pid] = { ...proc, children: [] }; });
+
+        const roots = [];
+        processes.forEach(proc => {
+          if (
+            !proc.ppid ||
+            proc.ppid === proc.pid ||
+            !pidMap[proc.ppid]
+          ) {
+            roots.push(pidMap[proc.pid]);
+          } else {
+            pidMap[proc.ppid].children.push(pidMap[proc.pid]);
+          }
+        });
+
+        let nodeId = 0;
+        function renderNode(node, level = 0) {
+          const hasChildren = node.children && node.children.length > 0;
+          const thisId = "proc-" + (++nodeId);
+          return `
+            <li>
+            ${hasChildren
+              ? `<span class="expand" onclick="toggle('${thisId}')">&#9654;</span>`
+              : `<span style="display:inline-block;width:18px"></span>`
+            }
+            <span class="label">${node.name}</span>
+            (PID: ${node.pid}, CPU: ${node.cpu_percent?.toFixed(1) || 0}%, RAM: ${node.memory_mb?.toFixed(1) || 0} MB)
+            ${hasChildren
+              ? `<ul id="${thisId}" class="hidden" style="margin-left:20px">${node.children.map(child => renderNode(child, level+1)).join('')}</ul>`
+              : ''
+            }
+            </li>
+          `;
+        }
+
+        return `<ul>${roots.map(root => renderNode(root)).join('')}</ul>`;
+      }
+
+      container.innerHTML = buildProcessTree(processes);
+    }
+  }
+}
+
+function toggle(id) {
+  const el = document.getElementById(id);
+  el.classList.toggle("hidden");
+}
+
+setInterval(fetchData, 50000);
+window.onload = fetchData;
+</script>
+
+</body>
+</html>
